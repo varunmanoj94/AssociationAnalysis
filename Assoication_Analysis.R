@@ -12,9 +12,15 @@ library(gt)
 library(tidyr)
 library(paletteer)
 library(viridis)
-library(bbplot)
+library(devtools)
+devtools::install_github('bbc/bbplot')
 library(RColorBrewer)
+library(sysfonts)
+install.packages("extrafont")
 
+font_files()
+
+font_add_google("Reforma")
 #Read both transaction records
 #If not initialised, set your working directory by using setwd()
 retail_old <- read_excel("online_retail_II.xlsx")
@@ -77,9 +83,9 @@ gt_misc_StockCode <- misc_StockCode %>%
             locations = cells_column_labels(everything())) %>%
   tab_style(cell_borders(sides = "left", color = "#A8A8A8", weight = px(3)),
             locations = cells_body(columns = "Description")) %>%
-  tab_row_group(group = "Bad StockCodes",
+  tab_row_group(label = "Bad StockCodes",
     rows = !grepl('^[0-9]|DCGS|gift|C2|SP', StockCode)) %>%
-  tab_row_group(group = "Good StockCodes",
+  tab_row_group(label = "Good StockCodes",
     rows = grepl('^[0-9]|DCGS|gift|C2|SP', StockCode)) %>%
   tab_style(style = list(cell_fill(color = "#259A00"), cell_text(weight = "bold" , color = "#FFFFFF")),
             cells_row_groups("Good StockCodes")) %>%
@@ -108,7 +114,7 @@ retail_clean %>%
 #Show disparity between naming conventions
 
 #Fill NA's with the fill function
-#This might not be needed if we filter corrrectly for Quantity and UnitPrice
+#This might not be needed if we filter correctly for Quantity and UnitPrice
 
 #Figure out how to display columns where StockCode != Description
 
@@ -140,6 +146,8 @@ gt_dups_Description <- dups_Description[1:20,] %>%
   tab_style(style = cell_fill(color = "#FFDAFD"),
             locations = cells_body(rows = grepl("MODERN CHRISTMAS TREE CANDLE", Description))) %>%
   cols_label(dupe_count = "Number of Duplicates")
+
+gt_dups_Description
 
 gtsave(gt_dups_Description, "dups_Description.png")
 
@@ -216,13 +224,14 @@ gg_top_sold <- retail_clean %>%
   group_by(StockCode, Description) %>% 
   dplyr::summarize(count = n(), .groups = "drop") %>%
   ungroup() %>%
-  mutate(Description = forcats::fct_reorder(Description, desc(count)))
+  arrange(desc(count))
 
-gg_top_sold_sorted <- gg_top_sold %>%
-  mutate(Description = fct_reorder(Description, desc(count))) %>%
-  head(n = 10)
+retail_clean %>%
+  select(StockCode, Description, Quantity) %>% 
+  group_by(StockCode, Description) %>%
+  dplyr::summarise(count = n())
 
-ggplot(gg_top_sold_sorted, aes(y = count, x = fct_reorder(Description, count))) +
+ggplot(gg_top_sold[1:10,], aes(y = count, x = fct_reorder(Description, count))) +
   geom_bar(stat='identity', aes(fill = Description)) +
   scale_fill_brewer(palette = "Paired") +
   coord_flip() +
@@ -231,10 +240,10 @@ ggplot(gg_top_sold_sorted, aes(y = count, x = fct_reorder(Description, count))) 
   labs(title = "Most Frequently Purchased Items") +
   scale_y_continuous(breaks = c(1000,2000,3000,4000,5000))+
   theme(aspect.ratio = 3/4,
-        panel.grid.major.x = element_line(color="#cbcbcb"), 
+        panel.grid.major.x = element_line(color="#CBCBCB"), 
         panel.grid.major.y=element_blank(),
         legend.position = "none",
-        text = element_text(family = "Serif"),
+        text = element_text(family = "Arial"),
         axis.text.y = element_text(face = "bold", margin = margin(t = 0, r = -30, b = 0, l = 0)),
         axis.text.x = element_text(face = "bold"))
 
@@ -247,11 +256,7 @@ top_revenue_products <- retail_clean %>%
   dplyr::summarize(Item_Total = sum(Item_Total)) %>%
   arrange(desc(Item_Total))
 
-gg_top_revenue_sorted <- top_revenue_products %>%
-  mutate(Description = fct_reorder(Description, desc(Item_Total))) %>%
-  head(n = 10)
-
-ggplot(gg_top_revenue_sorted, aes(y = Item_Total, x = fct_reorder(Description, Item_Total))) +
+ggplot(top_revenue_products[1:10,], aes(y = Item_Total, x = fct_reorder(Description, Item_Total))) +
   geom_bar(stat='identity', fill = c("#A6CEE3", "#B1DF8A", "#320505", "#33A02C", "#6A3E9A",
                                       "#2578B4", "#EB7ECD", "#790000", "#FEF337", "#C0C0C0")) +
   scale_fill_brewer(palette = "Paired") +
@@ -262,7 +267,7 @@ ggplot(gg_top_revenue_sorted, aes(y = Item_Total, x = fct_reorder(Description, I
   scale_y_continuous(breaks = seq(50000, 450000, by=50000),
                      labels=scales::dollar_format()) +
   theme(aspect.ratio = 3/4,
-        panel.grid.major.x = element_line(color="#cbcbcb"), 
+        panel.grid.major.x = element_line(color="#CBCBCB"), 
         panel.grid.major.y=element_blank(),
         legend.position = "none",
         text = element_text(family = "Serif"),
@@ -274,8 +279,12 @@ ggsave("Top_Revenue_Items.png", width = 20, height = 15, dpi = 300)
 #Find the % of events this covers...how much % of revenue and how much % of items ordered
 freq_purchases <- retail_clean %>%
   group_by(StockCode, Description) %>%
-  dplyr::summarize(Quantity = sum(Quantity)) %>%
+  dplyr::summarize(Quantity = sum(Quantity), .groups = "drop") %>%
   arrange(desc(Quantity))
+
+tmp <- retail_clean %>%
+  group_by(StockCode, Description) %>%
+  dplyr::summarize(count = n(), .groups = "drop")
 
 freq_purchases_differences <- freq_purchases %>%
   inner_join(tmp, by = c("StockCode", "Description")) %>%
@@ -312,6 +321,7 @@ gt_freq_purchases_difference
 gtsave(gt_freq_purchases_difference, "freq_purchases_difference_table.png")
 
 #Total number of invoices; be sure to bring up how quantity doesn't affect itemsets
+#Notice how sometimes there's multiple commas because of the description--you can see them here
 commas_retail <- retail_clean %>%
   filter(grepl(",", Description)) %>%
   head(n = 20) %>%
@@ -325,7 +335,6 @@ check <- retail_clean %>%
   select(InvoiceNo, Description) %>%
   unique()
 
-#Notice how sometimes there's multiple commas because of the description--you can see them here
 ##A comma throws everything off but we can still keep other punctuation
 no_comma <- apply(retail_clean, 2, FUN = function(y) gsub(',','', y))
 
