@@ -1,0 +1,442 @@
+---
+title: "Association Analysis"
+author: "Varun Manoj"
+date: "20/05/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(janitor)
+library(plyr)
+library(arules)
+library(arulesViz)
+library(htmlwidgets)
+library(ggplot2)
+library(gt)
+library(tidyr)
+library(bbplot)
+library(paletteer)
+library(viridis)
+library(RColorBrewer)
+library(dplyr)
+library(forcats)
+```
+
+## Introduction
+
+Following last month's blog post, I'll look to provide some additional analytical methods that we can apply on sales transaction data. The method that we'll explore in this post can be applied to any form of sales data, from e-commerce sites or traditional brick and mortar stores. Association analysis can be used to derive crucial insights to inform business decisions concerning three of the four P's of marketing--product, positioning and price--and can be used to guide decision-making in the digital era.
+
+> [**Association Analysis**](https://www.jmp.com/support/help/en/15.2/index.shtml#page/jmp/association-analysis.shtml) enables you to identify items that have an affinity for each other. It is frequently used to analyze transactional data (also called market baskets) to identify items that often appear together in transactions. For example, grocery stores and online merchants use association analysis to strategically organize and recommend products that tend to be purchased together.
+
+## Data Preprocessing
+
+This blog's dataset is actually an extension from last month's dataset. I wanted to test myself with a larger dataset but couldn't seem to find an appropriate one until I stumbled upon [retail data](https://archive.ics.uci.edu/ml/datasets/Online+Retail+II) of the two years prior to the previously used dataset. In case you missed the last blog post, here's a [recap](https://varunmanoj.blog/2021/01/27/clustering-from-sales-trancation-data/) of the dataset from the last blog post.
+
+The goal of data preprocessing often differs with the choice of analytical model. We need a very particular format of data for association analysis: two columns, one with an invoice or transaction ID, and the other with a column of items purchased by description. Keeping that goal in mind, we can manipulate our dataset accordingly to transform it to the desired format. We must note that this format is inconsistent with [tidy data principles](https://cran.r-project.org/web/packages/tidyr/vignettes/tidy-data.html), however it's required for this type of analysis. We begin the analysis by importing the two different transaction record files and combining them into one data frame. We need to be careful about naming conventions, as we can already see some inconsistency between the two sets of transaction data. We can fix the problem by using the `rename()` function, and rename the columns 'Price', 'Invoice' and 'Customer ID' to 'UnitPrice', 'InvoiceNo' and 'CustomerID' respectively.
+
+```{r retail}
+#Read both transaction records
+#If not initialised, set your working directory by using setwd()
+retail_old <- read_excel("online_retail_II.xlsx")
+retail_new <- read_excel("Online Retail.xlsx")
+
+#Use standardized naming conventions
+retail_old <- retail_old %>%
+  rename(c("Invoice" = "InvoiceNo", "Price" = "UnitPrice" , `Customer ID` = "CustomerID"))
+
+#Combine rows, this is a base R function with the tidyverse version being rbind()
+retail <- bind_rows(retail_new, retail_old)
+
+#Find summary statistics
+summary(retail)
+```
+
+The combined dataset 1,067,370 observations but the data's far from clean. We can see a couple of problems from the results of the `summary()` function: over 240,000 records have NA's in the CustomerID variable, at least 1 record has a negative UnitPrice and at least 1 record has a negative Quantity. We don't need to be worried about the CustomerID variable for association analysis, but we do need to ensure our dataset has only positive values for UnitPrice and Quantity. We can filter for our requirements using the `filter()` function and confirm we have a complete datatset by checking the `is.na()` function:
+
+```{r NAs}
+#Include only positive values
+retail_clean <- retail %>%
+  filter(Quantity > 0 & UnitPrice > 0)
+
+#Check for presence of NAs
+retail_clean %>%
+  filter(is.na(Description))
+```
+
+This data frame seems to have complete data for all the variables that we require. Next, let's explore the StockCode column to check if there are any problems. We can see that there are three main types of StockCode variables: numeric, alpha-numeric and alphabets. This is a perfect opportunity to use some REGEX to differentiate observations and determine whether or not to include certain observations. We can begin by using REGEX to filter out all non-numeric StockCodes by using the `grepl()` function to specify our regular expression.
+
+```{r cleaner_data}
+#Data's clean but not clean enough, there are still StockCodes such as M, Amazonfee etc. that need to be removed
+#Let's see all the non-numeric StockCodes
+misc_StockCode <- retail_clean %>%
+  filter(!grepl('^[0-9]', StockCode))
+```
+<br>
+There are only 4,793 observations with these 'miscellaneous' StockCodes, however they can still affect our association analysis and must examine these variables. Upon inspection of these observations, we can see that there are StockCodes that resemble 'Postage', 'Manual' and 'Dotcom Postage', all of which aren't items that are sold by the retailer. On the contrary, there are StockCodes such as 'C2' and 'gift' which resemble 'Carriage' and 'Gift card' respectively and are items that the retailer sells. We need to use our own judgement here to determine whether to include certain observations, and I feel a good rule of thumb is keep items that have multiple observations with the same StockCode, Description and UnitPrice, and discard the rest. This shows that an item is consistently priced for the same description, hence must be an item sold by the retailer. We can modify the previous REGEX to include non-numerics, along with StockCodes that begin with 'DCGS', 'gift', 'C2' and 'SP'. We've display some of these 'good' and 'bad' StockCodes in a tabular format below. We can subsequently update the retail_clean data frame to exclude those observations.
+<br>
+<br>
+```{r differetiating_stock_codes, echo=FALSE}
+gt_misc_StockCode <- misc_StockCode %>%
+  select(StockCode, Description) %>%
+  distinct() %>%
+  head(n = 20) %>%
+  gt() %>%
+  tab_header(title = md("**Differentiating StockCodes**"),
+             subtitle = md("Segregating StockCodes into Good and Bad")) %>%
+  tab_options(table.border.top.width = 10,
+              heading.border.bottom.width = 10,
+              heading.border.bottom.color = "#A8A8A8") %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_column_labels(everything())) %>%
+  tab_style(cell_borders(sides = "left", color = "#A8A8A8", weight = px(3)),
+            locations = cells_body(columns = "Description")) %>%
+  tab_row_group(label = "Bad StockCodes",
+    rows = !grepl('^[0-9]|DCGS|gift|C2|SP', StockCode)) %>%
+  tab_row_group(label = "Good StockCodes",
+    rows = grepl('^[0-9]|DCGS|gift|C2|SP', StockCode)) %>%
+  tab_style(style = list(cell_fill(color = "#259A00"), cell_text(weight = "bold" , color = "#FFFFFF")),
+            cells_row_groups("Good StockCodes")) %>%
+  tab_style(style = list(cell_fill(color = "#AA0000"), cell_text(weight = "bold" , color = "#FFFFFF")),
+            cells_row_groups("Bad StockCodes")) %>%
+  cols_width("StockCode" ~ px(200),
+             "Description" ~ px(300)) %>%
+  tab_style(style = cell_text(font = "Fira Sans"),
+            locations = list(cells_column_labels(everything()),
+                             cells_body(everything()),
+                             cells_title(groups = "title"),
+                             cells_title(groups = "subtitle"),
+                             cells_row_groups(everything()))) %>%
+  tab_options(table.font.size = pct(90))
+
+gt_misc_StockCode
+```
+
+## Data Integrity
+
+The inconsistent naming conventions that we observed in the previous section is a red flag that other elements of the dataset might need further inspection. Upon taking a glance at the observations we can see that there's potentially naming inconsistencies in the database. One StockCode could have multiple descriptions and one Description could have multiple StockCodes. This is a sign of poor database design and can lead to serious problems if unaddressed. We can explore some of the duplicate StockCode and Description combinations and subsequently make a decision on how to deal with those.
+<br>
+```{r duplicate_stockcodes, echo=FALSE}
+#Find duplicates with janitor's get_dupes() function
+dups_Description <- retail_clean %>%
+  select(StockCode, Description) %>%
+  distinct() %>%
+  get_dupes(Description) %>%
+  arrange(desc(dupe_count)) %>%
+  relocate(StockCode, Description, dupe_count)
+
+gt_dups_Description <- dups_Description[1:20,] %>%
+  gt() %>%
+  tab_header(title = md("**Duplicate Descriptions**"),
+             subtitle = md("Same *Descriptions* with Different *StockCodes*")) %>%
+  tab_options(table.border.top.width = 10,
+              heading.border.bottom.width = 10,
+              heading.border.bottom.color = "#A8A8A8") %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_column_labels(everything())) %>%
+  tab_style(style = cell_fill(color = "#BCFFC0"),
+            locations = cells_body(rows = grepl("METAL SIGN,CUPCAKE SINGLE HOOK", Description))) %>%
+  tab_style(style = cell_fill(color = "#FEFFBB"),
+            locations = cells_body(rows = grepl("COLUMBIAN CANDLE ROUND", Description))) %>%
+  tab_style(style = cell_fill(color = "#BCC5FF"),
+            locations = cells_body(rows = grepl("SET OF 4 FAIRY CAKE PLACEMATS", Description))) %>%
+  tab_style(style = cell_fill(color = "#C5987B"),
+            locations = cells_body(rows = grepl("COLOURING PENCILS BROWN TUBE", Description))) %>%
+  tab_style(style = cell_fill(color = "#FFDAFD"),
+            locations = cells_body(rows = grepl("MODERN CHRISTMAS TREE CANDLE", Description))) %>%
+  cols_label(dupe_count = "Number of Duplicates") %>%
+  tab_style(style = cell_text(font = "Fira Sans"),
+            locations = list(cells_column_labels(everything()),
+                             cells_body(everything()),
+                             cells_title(groups = "title"),
+                             cells_title(groups = "subtitle"))) %>%
+  cols_width("StockCode" ~ px(100),
+             dupe_count ~ px(100)) %>%
+  cols_align(align = "center", columns = c(dupe_count)) %>%
+  tab_options(table.font.size = pct(90))
+
+gt_dups_Description
+```
+<br>
+<br>
+```{r duplicate_descriptions, echo=FALSE}
+dups_StockCode <- retail_clean %>%
+  select(StockCode, Description) %>%
+  distinct() %>%
+  get_dupes(StockCode) %>%
+  arrange(desc(dupe_count)) %>%
+  relocate(StockCode, Description, dupe_count)
+
+gt_dups_StockCode <- dups_StockCode[1:20,] %>%
+  gt() %>%
+  tab_header(title = md("**Duplicate StockCodes**"),
+             subtitle = md("Same *StockCodes* with Different *Descriptions*")) %>%
+  tab_options(table.border.top.width = 10,
+              heading.border.bottom.width = 10,
+              heading.border.bottom.color = "#A8A8A8") %>%
+  tab_style(style = cell_fill(color = "#FF7F7F"),
+            locations = cells_body(rows = grepl("20685", StockCode))) %>%
+  tab_style(style = cell_fill(color = "#FFA7F8"),
+            locations = cells_body(rows = grepl("22344", StockCode))) %>%
+  tab_style(style = cell_fill(color = "#B9BEFF"),
+            locations = cells_body(rows = grepl("22345", StockCode))) %>%
+  tab_style(style = cell_fill(color = "#BDFFB9"),
+            locations = cells_body(rows = grepl("22346", StockCode))) %>%
+  tab_style(style = cell_fill(color = "#FFD0F9"),
+            locations = cells_body(rows = grepl("22384", StockCode))) %>%
+  cols_label(dupe_count = "Number of Duplicates") %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_column_labels(everything())) %>%
+  tab_style(style = cell_text(font = "Fira Sans"),
+            locations = list(cells_column_labels(everything()),
+                             cells_body(everything()),
+                             cells_title(groups = "title"),
+                             cells_title(groups = "subtitle"))) %>%
+  cols_width("StockCode" ~ px(100),
+             dupe_count ~ px(100)) %>%
+  cols_align(align = "center", columns = c(dupe_count)) %>%
+  tab_options(table.font.size = pct(90))
+
+gt_dups_StockCode
+```
+<br>
+We can see the records of duplicates of both StockCode and Description. There are 1,256 observations with the same StockCode and but different Description combinations--600 distinct StockCodes but 1,256 unique Descriptions for these StockCodes. Meanwhile, there are only 82 observations with the same Description but different StockCode combination, with 38 unique Descriptions spanning across 78 distinct StockCodes. Now that we have all the StockCodes for the items that are duplicates, we can enter these StockCodes into our retail_clean data frame to see how many of our transactions are duplicates. Quite surprisingly, over 240,000 transactions include those of duplicated items. This means that the same item might have two (or more) different StockCodes and all different StockCode-Description combinations are credited for the sale. This can be extremely misleading for the analyst as we are unsure which is truly the 'correct' StockCode-Description combination. Moreover, this can be troublesome for our analysis as items may have a strong lift or support value but because they have multiple descriptions, we might not be able to uncover their true associations. On the flip side, if we choose to exclude these observations then we might be forgoing information on really popular or profitable products for the retailer. For this reason, I chose to include the duplicated items but with much hesitation.
+
+## Exploratory Data Analysis
+
+We covered some exploratory data analysis in the previous blog post so I won't spend too much time in this section. We showed the recency, frequency and monetary distributions last time, so now we'll focus more on the products sold. First up, let's look at the most sold products by quantity. We can find this by grouping the StockCode and Description columns and then counting the total. The results are shown below, but keep in mind there may be some duplicates that are underrepresented, i.e. products with the same Description but different StockCode will be counted separately.
+
+```{r freq_purchases, echo=FALSE, warning=FALSE}
+gg_top_sold <- retail_clean %>% 
+  group_by(StockCode, Description) %>% 
+  dplyr::summarize(count = n(), .groups = "drop") %>%
+  ungroup() %>%
+  arrange(desc(count))
+
+ggplot(gg_top_sold[1:10,], aes(y = count, x = fct_reorder(Description, count))) +
+  geom_bar(stat='identity', aes(fill = Description)) +
+  scale_fill_brewer(palette = "Paired") +
+  coord_flip() +
+  geom_hline(yintercept = 0, size = 1, colour="#333333") +
+  theme_minimal() +
+  labs(title = "Top Item Sold",
+       subtitle = "Items most frequently bought by customers excluding duplicates",
+       y = "Number of Item Sold") +
+  scale_y_continuous(breaks = c(1000,2000,3000,4000,5000,6000,7000))+
+  theme(text = element_text(family = "Fira Sans"),
+        panel.grid.major.x = element_line(color="#CBCBCB"), 
+        panel.grid.major.y=element_blank(),
+        legend.position = "none",
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(face = "bold"),
+        axis.text.y = element_text(margin = margin(t = 0, r = -10, b = 0, l = 0)),
+        axis.title.y = element_blank(),
+        plot.title.position = "plot")
+```
+
+Next, we'll take a look at the highest revenue generating products. This is different from the previous plot as we'll be taking into account the price as well as the quantity sold. We can see there are some similarities in the top 10 products between the two visualizations, but the differences are where we need to zero in. The seventh to tenth best sellers by revenue aren't even in the top 10 for the best sellers by frequency, seen by the difference in colour representation between the two graphs. Meanwhile, four of the top five are the same in both plots, with the anomaly being "PAPER CRAFT, LITTLE BIRDIE"
+
+```{r top_grossing, echo=FALSE, warning=FALSE}
+top_revenue_products <- retail_clean %>%
+  mutate(Item_Total = UnitPrice * Quantity) %>%
+  select(StockCode, Description, Item_Total) %>%
+  group_by(StockCode, Description) %>%
+  dplyr::summarize(Item_Total = sum(Item_Total), .groups = "drop") %>%
+  arrange(desc(Item_Total))
+
+ggplot(top_revenue_products[1:10,], aes(y = Item_Total, x = fct_reorder(Description, Item_Total))) +
+  geom_bar(stat='identity', fill = c("#A6CEE3", "#B1DF8A", "#320505", "#33A02C", "#6A3E9A",
+                                      "#2578B4", "#EB7ECD", "#790000", "#FEF337", "#C0C0C0")) +
+  coord_flip() +
+  geom_hline(yintercept = 0, size = 1, colour="#333333") +
+  theme_minimal() +
+  labs(title = "Top Grossing Items",
+       subtitle = "Items that brought in the highest amount of revenue",
+       y = "Revenue") +
+  scale_y_continuous(breaks = seq(50000, 450000, by=50000),
+                     labels=scales::dollar_format()) +
+  theme(text = element_text(family = "Fira Sans"),
+        panel.grid.major.x = element_line(color="#CBCBCB"), 
+        panel.grid.major.y=element_blank(),
+        legend.position = "none",
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(face = "bold"),
+        axis.text.y = element_text(margin = margin(t = 0, r = -10, b = 0, l = 0)),
+        axis.title.y = element_blank(),
+        plot.title.position = "plot")
+```
+
+When we query this item we can see that it is in fact only bought in one transaction, however the customer bought 80,995 of them! If we had information of the costs of these products we can even compute the retailer's most profitable products using a similar calculation. This is a crucial yet overlooked feature of market basket analysis--we can only find associations of products that are used in multiple transactions. Hence, although some of these products might bring in large revenues, we won't be able to derive any valuable associations as they'll have a very low lift value (explained in the following section) and their sales are deemed unpredictable. This brings us to our next topic, if we want to observe the difference between the total quantity of products sold and the total number of transactions of the products, we can see it in a tabular format below.
+<br>
+```{r total_transactions, echo=FALSE}
+#Find the % of events this covers...how much % of revenue and how much % of items ordered
+freq_purchases <- retail_clean %>%
+  group_by(StockCode, Description) %>%
+  dplyr::summarize(Quantity = sum(Quantity), .groups = "drop") %>%
+  arrange(desc(Quantity))
+
+tmp <- retail_clean %>%
+  group_by(StockCode, Description) %>%
+  dplyr::summarize(count = n(), .groups = "drop")
+
+freq_purchases_differences <- freq_purchases %>%
+  inner_join(tmp, by = c("StockCode", "Description")) %>%
+  mutate(Difference = Quantity - count) %>%
+  rename(c("Quantity" = "Total Item Sold", "count" = "Total Transactions")) %>%
+  arrange(desc(`Total Item Sold`), desc(`Total Transactions`)) %>%
+  ungroup() %>%
+  select(-StockCode) %>%
+  head(n = 20)
+
+#gt
+gt_freq_purchases_difference <- freq_purchases_differences %>%
+  gt() %>%
+  tab_style(style = cell_fill(color = "#FF0000"),
+            locations = cells_body(columns = c("Total Transactions"),
+                                   rows = `Total Transactions` < 500)) %>%
+  tab_style(style = cell_fill(color = "#FF6C6C"),
+            locations = cells_body(columns = c("Total Transactions"),
+                                   rows = `Total Transactions` > 500 & `Total Transactions` < 1550)) %>%
+  tab_style(style = cell_fill(color = "#FFAAAA"),
+            locations = cells_body(columns = c("Total Transactions"),
+                                   rows = `Total Transactions` > 1550 & `Total Transactions` < 2550)) %>%
+  tab_style(style = cell_fill(color = "#FFE2E2"),
+            locations = cells_body(columns = c("Total Transactions"),
+                                   rows = `Total Transactions` > 2550)) %>%
+  cols_align(align = "center",
+             columns = c("Total Item Sold", "Difference")) %>%
+  tab_style(style = cell_text(weight = "bold"),
+           locations = cells_column_labels(everything())) %>%
+  tab_style(style = cell_text(font = "Fira Sans"),
+            locations = list(cells_column_labels(everything()),
+                             cells_body(everything()),
+                             cells_title(groups = "title"),
+                             cells_title(groups = "subtitle"))) %>%
+  cols_align(align = "center",
+             columns = "Total Transactions") %>%
+  tab_options(table.font.size = pct(85))
+
+gt_freq_purchases_difference
+```
+<br>
+This table above shows us why exploratory data analysis is so important: we can find relationships in the data that we wouldn't have guessed existed beforehand. In this example, the cells that are bright red coloured show items that were purchased in only a small amount of transactions, yet they resulted in a large amount of items sold. As an analyst, we can create new metrics to identify these items and take action upon them. In this example, a new metric that can be created is Ratio of Total Sales Per Transactions' and we subsequently find all the items with a very low ratio of sales per transaction. This new metric can be useful in identify items that are popular albeit sold to very few customers. We can then identify those existing customers and try to sell the products to customers in their same segment.
+
+Now that we've found some meaningful relationships in our dataset, we can proceed to the data manipulation stage to get the data ready for association analysis.
+
+## Data Manupilation
+
+Now that we have a better understanding of our dataset and have explored its various dimensions, we can begin the data manipulation process to fit the dataset to an association rules model. Our goal is to produce a dataset where each row is an observation of a unique transaction, depicted by InvoiceNo. The ideal dataset will only have two columns--InvoiceNo and a newly created 'items' column, which is a string concatenation of all items purchased in that transaction. However, string concatenations are generally separated with a comma, but certain product names in the Description column already have commas. Let's take a look at some of the product descriptions that have a comma and see if we can possibly replace it.
+<br>
+```{r commas}
+retail_clean %>%
+  filter(grepl(",", Description)) %>%
+  head(n = 20) %>%
+  gt() %>%
+  cols_align(align = "center",
+             columns = "Quantity") %>%
+  tab_options(table.font.size = pct(85))
+```
+<br>
+As we can see above, the use of commas in product names is very inconsistent as sometimes there’s whitespace between characters while sometimes there isn’t. Notably, we can see if we drop the comma it doesn’t change our comprehension ability of the product. We can go ahead and drop the comma by applying the `gsub()` function in the `apply()` function. Next, we can use the `ddply()` function to create a dataframe of only one column of the string concatenation of all products. We can then write this data frame as a CSV, and read it back in using the `read.transactions()` function from the [arules package](https://cran.r-project.org/web/packages/arules/arules.pdf). The arules package provides several computation methods required to conduct our market basket analysis.
+
+```{r no_commas}
+##A comma throws everything off but we can still keep other punctuation
+no_comma <- apply(retail_clean, 2, FUN = function(y) gsub(',','', y))
+
+#Before this step ensure you don't want to put a unique() function to get only 1 item per itemset
+transactionData <- ddply(data.frame(no_comma), "InvoiceNo",
+                         function(x) paste(x$Description,
+                                            collapse = ","))
+```
+<br>
+
+## Market Basket Analysis
+
+Before we begin our analysis, let’s go through the three main concepts of market basket analysis: support, confidence and lift.
+
+* Support: The ‘popularity’ of the rule. Support is calculated by finding the probability of both item A and item B being observed together. It’s simply the percentage of the total number of transactions that qualify for the rule. 
+* Confidence: The ‘strength’ of the rule. The probability of observing item B when item A is already observed. This is basically the number of transactions that satisfy the rule (both item A and B) divided by the number of transactions that satisfy the left-hand side of the rule (only item A). 
+* Lift: The ‘significance’ of the rule. This value is calculated by finding the ratio of the probability of items A and B occurring together divided by the two individual probabilities for item A and item B. Hence, a lift value greater than 1 means that the rule observed can be attributed to more than just random chance. 
+The goal of our analysis is to find itemsets with large lift values above a minimum threshold of support and confidence values. This used to be a traditionally computationally intensive method, but has become a lot quicker with the introduction of new algorithms. There are different algorithms used to help greatly increase the computation speed, such as apriori, frequent-purchase (FP) growth, SETM algorithms. For the purpose of this analysis, I’ll use the popular apriori algorithm.
+
+The ‘magic’ behind the apriori algorithm lies in the anti-monotone property of support values. This basically states that if an itemset {A, B} is infrequent, then all of its supersets must be infrequent too.  Hence, instead of calculating the support, confidence and lift value of every combination of itemset, we can prune out infrequent itemsets and focus the computational power on the frequent itemsets. This can be observed in the image below where there are two different hypothetical situations displayed. The image with the red outline shows us the amount of potential combinations of 5 itemsets that are pruned away if it’s discovered that itemset {A} and itemset {B} individually have low support values. Similarly, the image with the purple outline shows us the amount of potential combinations if it’s discovered that itemset {A, B} has a low support score. 
+<br>
+![](Itemsets.png)
+<br>
+Now that we’re aware of the fundamental principles of market basket analysis, we can explore our dataset and inspect the resultant association rules. The apriori algorithm makes it pretty straightforward to compute association rules in both R and Python and have similar terminology in both languages. We provide a support value, a confidence value and a maximum length of the resultant rules. The default value for support and confidence in the arules package is 0.1 and 0.8 respectively. However, I chose 0.005 as the support value because the dataset has almost 40,000 transactions and finding two or more items that appear together in over 10% of the orders is uncommon for merchandise retailers in e-commerce. Even 0.005 is  It’s important to then sort the rules according to some metric–I chose lift as it’s the metric that shows the true significance of the rule. Another popular metric to sort by is ‘count’ as it’s useful to find the most popular itemsets. Below is a tabular representation of the top 20 rules sorted by the lift measure.
+
+```{r rules, echo=FALSE, warning=FALSE}
+write.csv(transactionData,"transactiondata.csv", quote = FALSE, row.names = FALSE)
+
+tr <- read.transactions('transactiondata.csv', format = 'basket', sep=',')
+
+association.rules <- apriori(tr, parameter = list(supp=0.005, conf=0.8, maxlen=100))
+
+rules_by_lift <- sort(association.rules, by = "lift")
+
+df_lift_rules <- as(rules_by_lift, 'data.frame')
+
+check <- as(rules_by_lift[!is.redundant(rules_by_lift)], 'data.frame')
+
+gt_lift_rules <- df_lift_rules %>%
+  head(n = 20) %>%
+  separate(col = rules, into = c("lhs", "rhs"), sep = "=>") %>%
+  rowid_to_column() %>%
+  dplyr::rename(rule = rowid) %>%
+  gt() %>%
+  fmt_number(columns = c("support"),
+             decimals = 4) %>%
+  fmt_number(columns = c("confidence"),
+             decimals = 2) %>%
+  fmt_number(columns = c("coverage"),
+             decimals = 4) %>%
+  fmt_number(columns = c("lift"),
+             decimals = 2) %>%
+  fmt(columns = c(lhs),
+      fns = function(x) {
+        gsub(',',', ', x)
+        }) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_column_labels(everything()))%>%
+  tab_options(table.font.size = pct(85))
+
+gt_lift_rules
+```
+<br>
+
+## Insights
+
+As we can see from the table above, the rules with the highest lift values are itemsets that appear to have similar themes. The first three rules are pertaining to different colours of the Regency Tea Plate set. The fourth, seventh and rule consists of different items of a Skull themed set. Similarly, the sixth rule is concerning Children’s Garden equipment. The arulesviz package contains plenty of different visualisation techniques for associations between items. We can visualize the top ten rules in a network graph to see the associations between the rules having the highest lift values.
+
+```{r interactive_rules, echo=FALSE,out.height="900px", out.width="900px"}
+plot(rules_by_lift[1:20], method="graph", engine="htmlwidget",
+     igraphLayout = "layout_in_circle")
+```
+<br>
+The graph above is interactive so you can click to see the top rated rules. Conversely, if you would like to look at the strength of associations of products with one another you can click on the product of your choice. We can see that the top 20 itemsets include 26 items bought together. This means that certain itemsets include an association of more than 2 items. For example, instead of an itemset representing {A -> B} it will represent {A, C -> B}. We can use a different visualisation technique, a parallel coordinate, to demonstrate the interaction of multiple products in an itemset. We can also expand our association rules to include the top 30 rules so we can potentially see more itemsets with multiple items.
+
+``` {r graph_rules, echo=FALSE, fig.height=12, fig.width=10}
+#Use argument `verbose = TRUE` inside the list function to see all other applicable arguments for 
+plot(rules_by_lift[1:30], method = "paracoord")
+```
+<br>
+The implications of finding the top rules can go a long way in helping retailers better understand their products. As mentioned in the introduction, association analysis gives the power to the retailer to alter up to three of the four P’s of marketing–place, promotion and price. 
+
+### Place
+
+Although several of the ‘place’ decisions are made by manufacturers, there are a handful of decisions retailers can make to encourage customers to purchase more. Since our dataset belongs to an e-commerce retailer, we’ll focus on solutions geared towards both brick-and-mortar and virtual stores. The most obvious ‘place’ decision that retailers can make is product placement. Placing items with high lift values close to one another can be advantageous. For example, placing the different coloured items of the Regency Tea Plate set will make them more visible for customers looking to purchase a tea set. In e-commerce this will be the equivalent of placing products on the same row of a website. 
+
+### Promotion
+
+There are two types of promotions that retailers typically communicate, one is about themselves and the other is about their products. Association analysis helps address the latter by showing us the most frequently bought products. Powered with this knowledge, retailers and e-retailers alike can produce their marketing collaterals featuring these products. Some examples would include featuring the Skull themed items–paper plates, paper plates and paper cups–together in a monthly or bi-weekly catalogue. For e-retailers, this will probably be in the form of an electronic brochure that customers scroll across on the website’s landing page. 
+
+Another approach that e-retailers can use, albeit only in the short-term, is to leverage retargeing. Since Google and Apple are implementing stricter privacy controls for the end user, retargeting won't be a viable long-term solution. Nevertheless, e-retailers can further leverage this information by opting to retarget their customers once they leave the website. Organisations can provide accurate and timley retargeted ads to customers who are likely interested in the products of the targeted ads. This will ensure that potential customers will have top-of-mind awareness of your product and brand.
+
+### Price
+
+This is an area that association analysis alone cannot tackle but definitely provides a starting point and a direction for analysts to pursue. Pricing analytics in its own right can and should be involved in pricing decision making, however association analysis is useful for retailers as they’ll be empowered to think about offers and discounts on popular products. Retailers and e-retailers can use the information of products with high lift values to guide which produce categories or subcategories to discount. 
+
