@@ -412,7 +412,7 @@ gt_lift_rules
 
 As we can see from the table above, the rules with the highest lift values are itemsets that appear to have similar themes. The first three rules are pertaining to different colours of the Regency Tea Plate set. The fourth, seventh and rule consists of different items of a Skull themed set. Similarly, the sixth rule is concerning Children’s Garden equipment. The arulesviz package contains plenty of different visualisation techniques for associations between items. We can visualize the top ten rules in a network graph to see the associations between the rules having the highest lift values.
 
-```{r interactive_rules, echo=FALSE,out.height="900px", out.width="900px"}
+```{r interactive_rules, echo=FALSE,out.height="1000px", out.width="1000px"}
 plot(rules_by_lift[1:20], method="graph", engine="htmlwidget",
      igraphLayout = "layout_in_circle")
 ```

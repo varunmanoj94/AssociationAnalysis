@@ -342,7 +342,7 @@ no_comma <- apply(retail_clean, 2, FUN = function(y) gsub(',','', y))
 transactionData <- ddply(data.frame(no_comma), "InvoiceNo",
                          function(x) paste(x$Description,
                                             collapse = ","))
-
+getwd()
 #Remove unneeded colnames
 transactionData$InvoiceNo <- NULL
 colnames(transactionData) <- "items"
@@ -399,7 +399,7 @@ retail_clean %>%
 
 topRules <- association.rules[1:10]
 
-plot(topRules)
+inspectDT(rules_by_lift)
 
 #Use argument `verbose = TRUE` inside the list function to see all other applicable arguments for 
 plot(rules_by_lift[1:10], method = "graph", con = list(cex = 0.6, arrowSize = 0.4, precision = 2))
